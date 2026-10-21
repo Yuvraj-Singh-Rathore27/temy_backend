@@ -45,7 +45,7 @@ export const authService = {
    * name/password (only the inbox owner can finish verification anyway).
    * Returns { email, retryAfterSeconds, devOtp? }.
    */
-  async register({ name, email, password }) {
+  async register({ name, email, password }, meta) {
     const passwordHash = await bcrypt.hash(password, config.auth.bcryptRounds);
     let user = await userRepository.findByEmail(email);
     if (user?.email_verified_at) throw AppError.conflict(ACCOUNT_EXISTS);
@@ -62,7 +62,12 @@ export const authService = {
       }
       logger.info('User registered', { userId: user.id });
     }
-    return { email: user.email, ...(await otpService.issue(user, 'verify_email')) };
+    // TEMPORARILY DISABLED: email verification (OTP). Re-enable later by restoring the
+    // line below, removing the auto-verify + startSession lines, and reverting the
+    // controller (register) and client (RegisterPage/AuthContext) changes.
+    // return { email: user.email, ...(await otpService.issue(user, 'verify_email')) };
+    await userRepository.markEmailVerified(user.id, new Date());
+    return startSession(await userRepository.findById(user.id), meta);
   },
 
   /** Confirm the emailed code and sign the user in. */

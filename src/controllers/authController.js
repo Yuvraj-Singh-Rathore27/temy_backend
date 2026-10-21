@@ -31,8 +31,12 @@ const requestMeta = (req) => ({ userAgent: req.get('user-agent'), ip: req.ip });
 export const authController = {
   /** Creates the account and emails a code; the session starts after verifyEmail. */
   async register(req, res) {
-    const result = await authService.register(req.valid.body);
-    res.status(201).json({ requiresVerification: true, ...result });
+    // TEMPORARILY DISABLED: email verification. Restore this to re-enable the OTP flow:
+    // const result = await authService.register(req.valid.body);
+    // res.status(201).json({ requiresVerification: true, ...result });
+    const result = await authService.register(req.valid.body, requestMeta(req));
+    setSessionCookies(res, result);
+    res.status(201).json({ user: result.user, accessToken: result.accessToken });
   },
 
   async verifyEmail(req, res) {

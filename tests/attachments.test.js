@@ -83,7 +83,7 @@ describe('uploading', () => {
     const bigImage = Buffer.concat([PNG, Buffer.alloc(1024 * 1024)]); // test limit: 1 MB for images
     const res = await upload(alice, ab, bigImage, 'big.png').expect(413);
     assert.equal(res.body.error.code, 'FILE_TOO_LARGE');
-    // The same bytes are fine as a document (100 MB limit).
+    // The same bytes are fine as a document (1 GB limit).
     await upload(alice, ab, bigImage, 'big.png', { kind: 'file' }).expect(201);
   });
 

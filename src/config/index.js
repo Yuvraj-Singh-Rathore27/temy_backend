@@ -170,15 +170,15 @@ export const config = Object.freeze({
     // Per-kind size limits for chat attachments (MB).
     maxBytes: {
       image: int('MAX_IMAGE_MB', 16) * 1024 * 1024,
-      video: int('MAX_VIDEO_MB', 100) * 1024 * 1024,
+      video: int('MAX_VIDEO_MB', 1024) * 1024 * 1024,
       audio: int('MAX_AUDIO_MB', 32) * 1024 * 1024,
       voice: int('MAX_AUDIO_MB', 32) * 1024 * 1024,
-      file: int('MAX_FILE_MB', 100) * 1024 * 1024,
+      file: int('MAX_FILE_MB', 1024) * 1024 * 1024,
       sticker: 512 * 1024,
     },
     thumbnailMaxBytes: 512 * 1024,
     // Total a single user may upload in 24 hours (stops one account filling the disk).
-    dailyQuotaBytes: int('MAX_UPLOAD_MB_PER_DAY', 2048) * 1024 * 1024,
+    dailyQuotaBytes: int('MAX_UPLOAD_MB_PER_DAY', 5120) * 1024 * 1024,
     maxAttachmentsPerMessage: 10,
     // Uploaded but never sent attachments are deleted after this long.
     orphanTtlHours: 24,

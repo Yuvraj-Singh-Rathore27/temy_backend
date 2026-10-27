@@ -64,10 +64,10 @@ export const attachmentService = {
         if (!THUMBNAIL_TYPES.has(thumbType.mime) || thumbnail.size > config.uploads.thumbnailMaxBytes) {
           throw new AppError(415, 'UNSUPPORTED_FILE', 'Invalid preview image');
         }
-        thumbnailKey = await attachmentStorage.store(thumbnail.path);
+        thumbnailKey = await attachmentStorage.store(thumbnail.path, 'image/jpeg');
       }
 
-      const storageKey = await attachmentStorage.store(file.path);
+      const storageKey = await attachmentStorage.store(file.path, detected.mime);
       const media = kind === 'image' || kind === 'video' || kind === 'sticker' || (pdf && Boolean(thumbnailKey));
       const timed = kind === 'video' || kind === 'audio' || kind === 'voice';
       const id = await attachmentRepository.insert({
@@ -141,11 +141,11 @@ export const attachmentService = {
     const key = thumbnail ? row.thumbnail_key : row.storage_key;
     if (Number(row.encrypted)) {
       // Ciphertext: always a download; the app decrypts it on the device.
-      return { path: attachmentStorage.pathFor(key), mimeType: 'application/octet-stream', name: 'encrypted', inline: false };
+      return { storageKey: key, mimeType: 'application/octet-stream', name: 'encrypted', inline: false };
     }
     const mimeType = thumbnail ? 'image/jpeg' : row.mime_type;
     return {
-      path: attachmentStorage.pathFor(key),
+      storageKey: key,
       mimeType,
       name: thumbnail ? 'thumbnail.jpg' : row.original_name,
       inline: thumbnail || INLINE_MIME_TYPES.has(row.mime_type),

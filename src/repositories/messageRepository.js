@@ -16,6 +16,9 @@ const SELECT = `
     FROM messages m
     LEFT JOIN messages r ON r.id = m.reply_to_id`;
 
+/** Search reads plaintext messages only; left to itself the planner walks every message instead. */
+const SEARCH_SELECT = SELECT.replace('FROM messages m', 'FROM messages m FORCE INDEX (idx_messages_plain)');
+
 /** Excludes messages the viewer deleted "for me". Takes the viewer id as its parameter. */
 const VISIBLE_TO = 'NOT EXISTS (SELECT 1 FROM message_hidden h WHERE h.message_id = m.id AND h.user_id = ?)';
 
@@ -155,6 +158,8 @@ export const messageRepository = {
   /**
    * Full-text-ish search over messages the user can see (their conversations,
    * not deleted, not hidden), newest first. Optionally within one conversation.
+   * Encrypted messages are skipped: the server only has their ciphertext (they are
+   * searched on the device), and their files are all named "encrypted".
    */
   async search({ userId, query, conversationId, limit }) {
     const pattern = `%${escapeLike(query)}%`;
@@ -166,9 +171,10 @@ export const messageRepository = {
     }
     params.push(limit);
     const [rows] = await pool.query(
-      `${SELECT}
+      `${SEARCH_SELECT}
          JOIN conversation_participants p ON p.conversation_id = m.conversation_id AND p.user_id = ?
-        WHERE m.deleted_at IS NULL
+        WHERE m.encrypted = 0
+          AND m.deleted_at IS NULL
           AND (m.body LIKE ? OR EXISTS (SELECT 1 FROM attachments fa WHERE fa.message_id = m.id AND fa.original_name LIKE ?))
           AND ${VISIBLE_TO} ${scope}
         ORDER BY m.id DESC
@@ -182,12 +188,12 @@ export const messageRepository = {
    * Mark messages addressed to `recipientId` as delivered or read, up to `upToId`
    * (or all of them). Returns the highest affected message id, or null if nothing changed.
    */
-  async markReceipt({ conversationId, recipientId, upToId, at, kind }) {
+  async markReceipt({ conversationId, recipientId, upToId, at, kind }, connection = pool) {
     const column = kind === 'read' ? 'read_at' : 'delivered_at';
     const rangeSql = upToId ? 'AND id <= ?' : '';
     const rangeParams = upToId ? [upToId] : [];
 
-    const [rows] = await pool.query(
+    const [rows] = await connection.query(
       `SELECT MAX(id) AS max_id FROM messages
         WHERE conversation_id = ? AND sender_id <> ? AND ${column} IS NULL ${rangeSql}`,
       [conversationId, recipientId, ...rangeParams],
@@ -197,7 +203,7 @@ export const messageRepository = {
 
     const assignments = kind === 'read' ? 'read_at = ?, delivered_at = COALESCE(delivered_at, ?)' : 'delivered_at = ?';
     const assignmentParams = kind === 'read' ? [at, at] : [at];
-    await pool.query(
+    await connection.query(
       `UPDATE messages SET ${assignments}
         WHERE conversation_id = ? AND sender_id <> ? AND ${column} IS NULL AND id <= ?`,
       [...assignmentParams, conversationId, recipientId, maxId],

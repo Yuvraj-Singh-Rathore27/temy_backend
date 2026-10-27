@@ -178,6 +178,16 @@ export const conversationRepository = {
     return rows.map((row) => row.user_id);
   },
 
+  /**
+   * Lock the conversation row for the rest of the transaction. Every write to a
+   * chat's messages (sends, receipts) takes this lock first, so concurrent writes
+   * queue up instead of locking rows in different orders and deadlocking — e.g. a
+   * message INSERT's foreign-key check share-locks this row before setLastMessage.
+   */
+  async lockForUpdate(connection, conversationId) {
+    await connection.execute('SELECT id FROM conversations WHERE id = ? FOR UPDATE', [conversationId]);
+  },
+
   async setLastMessage(connection, { conversationId, messageId, at }) {
     await connection.execute(
       `UPDATE conversations SET last_message_id = ?, last_message_at = ?

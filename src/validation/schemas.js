@@ -155,6 +155,22 @@ const emoji = z
   .max(32, 'Invalid emoji')
   .refine((value) => [...graphemes.segment(value)].length === 1 && EMOJI.test(value), 'Send a single emoji');
 
+/** One WebRTC signalling message: offer/answer, ICE candidate, or my mic/camera/screen state. */
+const callSignalData = z.discriminatedUnion('type', [
+  z.object({ type: z.enum(['offer', 'answer']), sdp: z.string().min(1).max(30_000) }),
+  z.object({
+    type: z.literal('candidate'),
+    candidate: z.object({
+      candidate: z.string().max(1_000),
+      sdpMid: z.string().max(64).nullish(),
+      sdpMLineIndex: z.number().int().min(0).max(64).nullish(),
+      usernameFragment: z.string().max(256).nullish(),
+    }),
+  }),
+  // My microphone / camera / screen-sharing state, so the other side can show "muted" / "camera off" / "sharing".
+  z.object({ type: z.literal('state'), audio: z.boolean(), video: z.boolean(), screen: z.boolean().optional() }),
+]);
+
 export const schemas = {
   register: z.object({ name, email, password }),
   login: z.object({
@@ -303,6 +319,13 @@ export const schemas = {
 
   // Socket.IO payloads
   socketSend: newMessage({ conversationId: id, clientId, replyToId: id.optional() }),
+  startRecording: z.object({
+    kind: z.enum(['audio', 'video'], { error: 'Choose audio or video' }),
+    mimeType: z.string().trim().min(1).max(100),
+  }),
+  recordingParam: z.object({ recordingId: id }),
+  recordingChunkParam: z.object({ recordingId: id, seq: z.coerce.number().int().min(0).max(100_000) }),
+  finishRecording: z.object({ durationMs: z.number().int().min(0).max(4 * 60 * 60 * 1000).optional() }),
   callHistory: z.object({ before: id.optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }),
   hideCalls: z.object({ callIds: z.array(id).min(1).max(200).optional(), all: z.literal(true).optional() })
     .refine((v) => Boolean(v.callIds) !== Boolean(v.all), 'Send either callIds or all: true'),
@@ -310,23 +333,9 @@ export const schemas = {
   socketCallStart: z.object({ conversationId: id, type: z.enum(['voice', 'video']) }),
   socketCall: z.object({ callId: id }),
   // WebRTC signalling, relayed as-is to the other party (only shapes and sizes are checked).
-  socketCallSignal: z.object({
-    callId: id,
-    data: z.discriminatedUnion('type', [
-      z.object({ type: z.enum(['offer', 'answer']), sdp: z.string().min(1).max(30_000) }),
-      z.object({
-        type: z.literal('candidate'),
-        candidate: z.object({
-          candidate: z.string().max(1_000),
-          sdpMid: z.string().max(64).nullish(),
-          sdpMLineIndex: z.number().int().min(0).max(64).nullish(),
-          usernameFragment: z.string().max(256).nullish(),
-        }),
-      }),
-      // My microphone / camera / screen-sharing state, so the other side can show "muted" / "camera off" / "sharing".
-      z.object({ type: z.literal('state'), audio: z.boolean(), video: z.boolean(), screen: z.boolean().optional() }),
-    ]),
-  }),
+  socketCallSignal: z.object({ callId: id, data: callSignalData }),
+  // Group calls: the same signalling, to one other participant named by `to`.
+  socketGroupCallSignal: z.object({ callId: id, to: id, data: callSignalData }),
   socketTyping: z.object({ conversationId: id, activity: z.enum(['typing', 'recording']).default('typing') }),
   socketReceipt: z.object({ conversationId: id, messageId: id.optional() }),
 };

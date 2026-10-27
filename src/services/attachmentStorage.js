@@ -4,50 +4,39 @@ import path from 'node:path';
 import { config } from '../config/index.js';
 import { attachmentRepository } from '../repositories/attachmentRepository.js';
 import { logger } from '../utils/logger.js';
+import { objectStorage } from './objectStorage.js';
 
 /**
- * Attachment files on disk, outside any public folder. Files are stored under
- * random 128-bit keys (never the user's file name) in two-level folders:
- * uploads/attachments/ab/ab12…ef
+ * Attachment files (chat photos, videos, voice notes, documents, stickers, GIFs and their
+ * previews), stored under random 128-bit keys (never the user's file name) in object
+ * storage, local disk or S3 (STORAGE_DRIVER), at attachments/ab/ab12…ef.
+ * Uploads first land in TEMP_DIR on this server's disk, where their type is checked.
  */
-const ROOT = path.join(config.uploads.dir, 'attachments');
 export const TEMP_DIR = path.join(config.uploads.dir, 'tmp');
 const KEY_PATTERN = /^[a-f0-9]{32}$/;
 
 export const attachmentStorage = {
   newKey: () => crypto.randomBytes(16).toString('hex'),
 
-  pathFor(key) {
+  /** Where the file with this key is stored: "attachments/ab/ab12…ef". */
+  objectKey(key) {
     if (!KEY_PATTERN.test(key)) throw new Error('Invalid storage key');
-    return path.join(ROOT, key.slice(0, 2), key);
+    return `attachments/${key.slice(0, 2)}/${key}`;
   },
 
   /** Move an uploaded temp file into storage; returns its new key. */
-  async store(tempPath) {
+  async store(tempPath, contentType = 'application/octet-stream') {
     const key = this.newKey();
-    const target = this.pathFor(key);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    try {
-      await fs.rename(tempPath, target);
-    } catch (error) {
-      if (error.code !== 'EXDEV') throw error;
-      // Different disk: copy, then remove the temp file.
-      await fs.copyFile(tempPath, target);
-      await fs.unlink(tempPath);
-    }
+    await objectStorage.current.put(this.objectKey(key), tempPath, contentType);
     return key;
   },
 
   async remove(key) {
     if (!key || !KEY_PATTERN.test(key)) return;
-    try {
-      await fs.unlink(this.pathFor(key));
-    } catch (error) {
-      if (error.code !== 'ENOENT') logger.warn('Could not delete attachment file', { error });
-    }
+    await objectStorage.removeEverywhere(this.objectKey(key)).catch((error) => logger.warn('Could not delete attachment file', { error }));
   },
 
-  /** First bytes of a file, for type detection. */
+  /** First bytes of an uploaded temp file, for type detection. */
   async readHead(filePath, bytes = 4096) {
     const handle = await fs.open(filePath, 'r');
     try {

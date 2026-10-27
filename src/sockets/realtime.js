@@ -42,8 +42,16 @@ export const realtime = {
     io.in(userIds.map(rooms.user)).socketsLeave(rooms.conversation(conversationId));
   },
 
+  /**
+   * Delivered/read ticks. A group receipt that didn't move the group-wide point
+   * (toGroup: false) only goes to the reader's own tabs, to clear their unread badge.
+   */
   broadcastReceipt(receipt) {
     if (!io || !receipt) return;
+    if (receipt.group && receipt.toGroup === false) {
+      io.to(rooms.user(receipt.byUserId)).emit('message:status', receipt);
+      return;
+    }
     io.to(rooms.conversation(receipt.conversationId)).emit('message:status', receipt);
   },
 

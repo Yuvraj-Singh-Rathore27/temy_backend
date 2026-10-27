@@ -3,8 +3,8 @@ import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
 import { config } from './config/index.js';
-import { AVATAR_DIR } from './services/profileService.js';
-import { WALLPAPER_DIR } from './services/wallpaperService.js';
+import { IMAGE_MIME } from './services/profileService.js';
+import { sendStoredFile } from './utils/storedFile.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { requestLogger } from './middleware/requestLogger.js';
 import { rateLimiters } from './middleware/security.js';
@@ -32,23 +32,30 @@ export function createApp() {
 
   app.use('/api', rateLimiters.api, apiRouter());
 
-  // Profile photos and wallpapers: random 128-bit file names, image bytes verified on upload.
-  // Served as inert files (no sniffing, no scripts) and usable from the app's origin.
-  const inertImages = (dir) =>
-    express.static(dir, {
-      index: false,
-      dotfiles: 'deny',
-      redirect: false,
-      immutable: true,
-      maxAge: '30d',
-      setHeaders(res) {
-        res.setHeader('X-Content-Type-Options', 'nosniff');
-        res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
-        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-      },
-    });
-  app.use('/uploads/avatars', inertImages(AVATAR_DIR));
-  app.use('/uploads/wallpapers', inertImages(WALLPAPER_DIR));
+  // Profile photos and wallpapers (local disk or S3): random 128-bit file names, image bytes
+  // verified on upload. Served as inert files (no sniffing, no scripts), cacheable for 30 days
+  // (a new photo gets a new name).
+  const IMAGE_NAME = /^[a-f0-9]{32}\.(jpg|png|webp)$/;
+  const inertImage = (folder) => async (req, res, next) => {
+    const match = IMAGE_NAME.exec(req.params.file);
+    if (!match) return next();
+    try {
+      await sendStoredFile(req, res, {
+        key: `${folder}/${req.params.file}`,
+        headers: {
+          'Content-Type': IMAGE_MIME[match[1]],
+          'Cache-Control': 'public, max-age=2592000, immutable',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "default-src 'none'; sandbox",
+          'Cross-Origin-Resource-Policy': 'cross-origin',
+        },
+      });
+    } catch (error) {
+      next(error.status === 404 ? undefined : error);
+    }
+  };
+  app.get('/uploads/avatars/:file', inertImage('avatars'));
+  app.get('/uploads/wallpapers/:file', inertImage('wallpapers'));
 
   app.use(notFoundHandler);
   app.use(errorHandler);

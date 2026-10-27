@@ -1,4 +1,5 @@
-import { Router } from 'express';
+import express, { Router } from 'express';
+import { config } from '../config/index.js';
 import { authController } from '../controllers/authController.js';
 import { blockController } from '../controllers/blockController.js';
 import { contactController } from '../controllers/contactController.js';
@@ -15,6 +16,7 @@ import { e2eeController } from '../controllers/e2eeController.js';
 import { gifController } from '../controllers/gifController.js';
 import { stickerController } from '../controllers/stickerController.js';
 import { groupController } from '../controllers/groupController.js';
+import { recordingController } from '../controllers/recordingController.js';
 import { authenticate, authenticateMedia } from '../middleware/authenticate.js';
 import { rateLimiters, requireXhr } from '../middleware/security.js';
 import { attachmentUpload, avatarUpload, stickerUpload, wallpaperUpload } from '../middleware/upload.js';
@@ -170,6 +172,30 @@ function callRoutes() {
   router.get('/', validate({ query: schemas.callHistory }), callController.history);
   router.post('/hide', rateLimiters.messageActions, validate({ body: schemas.hideCalls }), callController.hide);
   router.get('/ice-servers', callController.iceServers);
+  router.get('/active', callController.active);
+  router.get('/:id/recordings', validate({ params: schemas.idParam }), recordingController.listForCall);
+  router.post('/:id/recordings', rateLimiters.recordings, validate({ params: schemas.idParam, body: schemas.startRecording }), recordingController.start);
+  return router;
+}
+
+/** Call recordings: the browser uploads chunks while recording, then finishes. Playback is under /attachments. */
+function recordingRoutes() {
+  const router = Router();
+  router.use(authenticate);
+  router.put(
+    '/:recordingId/chunks/:seq',
+    rateLimiters.recordings,
+    validate({ params: schemas.recordingChunkParam }),
+    express.raw({ type: 'application/octet-stream', limit: config.recordings.maxChunkBytes }),
+    recordingController.appendChunk,
+  );
+  router.post(
+    '/:recordingId/finish',
+    rateLimiters.recordings,
+    validate({ params: schemas.recordingParam, body: schemas.finishRecording }),
+    recordingController.finish,
+  );
+  router.delete('/:recordingId', rateLimiters.messageActions, validate({ params: schemas.recordingParam }), recordingController.remove);
   return router;
 }
 
@@ -195,6 +221,8 @@ function attachmentRoutes() {
   // Downloads: bearer token or the media cookie (for <img>/<video>/<audio>).
   const one = validate({ params: schemas.attachmentParam, query: schemas.download });
   // My stickers' images live here so the media cookie (path /api/attachments) covers them.
+  // Call recordings too (bearer token or media cookie), streamed from local disk or S3.
+  router.get('/recordings/:recordingId', authenticateMedia, validate({ params: schemas.recordingParam, query: schemas.download }), recordingController.download);
   router.get('/stickers/:id', authenticateMedia, validate({ params: schemas.idParam, query: schemas.download }), stickerController.image);
   router.get('/:attachmentId', authenticateMedia, one, attachmentController.download);
   router.get('/:attachmentId/thumbnail', authenticateMedia, one, attachmentController.thumbnail);
@@ -248,6 +276,7 @@ export function apiRouter() {
   router.use('/attachments', attachmentRoutes());
   router.use('/groups', groupRoutes());
   router.use('/calls', callRoutes());
+  router.use('/recordings', recordingRoutes());
   router.use('/e2ee', e2eeRoutes());
   router.use('/gifs', gifRoutes());
   router.use('/stickers', stickerRoutes());

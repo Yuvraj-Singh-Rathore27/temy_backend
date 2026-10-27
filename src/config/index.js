@@ -48,6 +48,10 @@ if (/change-?me/i.test(jwtSecret)) {
   throw new Error('JWT_ACCESS_SECRET is still the example value. Generate a random one (see README).');
 }
 
+const storageDriver = env.STORAGE_DRIVER || 'local';
+if (!['local', 's3'].includes(storageDriver)) throw new Error('STORAGE_DRIVER must be "local" or "s3"');
+if (storageDriver === 's3' && !env.S3_BUCKET) throw new Error('STORAGE_DRIVER=s3 needs S3_BUCKET');
+
 export const config = Object.freeze({
   rootDir,
   env: nodeEnv,
@@ -85,6 +89,8 @@ export const config = Object.freeze({
     // tabs refreshing at the same moment do not log each other out.
     refreshReuseGraceMs: 30_000,
     bcryptRounds: int('BCRYPT_ROUNDS', 12),
+    // Email verification (OTP) after registering. Off for now: registering signs the user in directly.
+    requireEmailVerification: env.REQUIRE_EMAIL_VERIFICATION === 'true',
   },
   chat: {
     maxMessageLength: 4000,
@@ -101,7 +107,9 @@ export const config = Object.freeze({
     resendCooldownSeconds: int('OTP_RESEND_COOLDOWN_SECONDS', 60),
     // Show the code in API responses so the app works without an email server.
     // Opt-in for local development only: never in production or on a hosting platform.
-    devDisplay: nodeEnv !== 'production' && !hosted && env.OTP_DEV_DISPLAY === 'true',
+    // devDisplay: nodeEnv !== 'production' && !hosted && env.OTP_DEV_DISPLAY === 'true',
+    // OTP_DEMO_DISPLAY=true: show codes on screen even on the live server (demo only, NOT for real users).
+    devDisplay: (nodeEnv !== 'production' && !hosted && env.OTP_DEV_DISPLAY === 'true') || env.OTP_DEMO_DISPLAY === 'true',
   },
   mail: {
     // Any SMTP server works (Gmail app password, Brevo/Mailjet free tier, a local Mailpit, …).
@@ -134,6 +142,8 @@ export const config = Object.freeze({
     turnUsername: env.TURN_USERNAME || '',
     turnCredential: env.TURN_CREDENTIAL || '',
     turnTtlSeconds: 12 * 3600,
+    // Group calls are a mesh (everyone sends to everyone), so they stay small.
+    maxGroupParticipants: int('MAX_GROUP_CALL_PARTICIPANTS', 6),
   },
   // GIF search (optional). Free key from developers.giphy.com; without it only "Recent GIFs" works.
   gifs: {
@@ -172,5 +182,26 @@ export const config = Object.freeze({
     maxAttachmentsPerMessage: 10,
     // Uploaded but never sent attachments are deleted after this long.
     orphanTtlHours: 24,
+  },
+  // Where call recordings are stored: 'local' (UPLOAD_DIR on this server) or 's3'.
+  storage: {
+    driver: storageDriver,
+    s3: {
+      bucket: env.S3_BUCKET || '',
+      region: env.S3_REGION || env.AWS_REGION || 'ap-south-1',
+      // Optional folder inside the bucket, e.g. "prod/" (always ends with a slash when set).
+      prefix: (env.S3_PREFIX || '').replace(/^\/+|\/+$/g, '').replace(/(.)$/, '$1/'),
+      // S3-compatible services (MinIO, Cloudflare R2): their URL, and usually path-style addressing.
+      endpoint: env.S3_ENDPOINT || undefined,
+      forcePathStyle: env.S3_FORCE_PATH_STYLE === 'true',
+    },
+  },
+  recordings: {
+    maxBytes: int('MAX_RECORDING_MB', 1024) * 1024 * 1024,
+    // The browser uploads a chunk every few seconds; one chunk is never this big.
+    maxChunkBytes: 8 * 1024 * 1024,
+    maxDurationMs: 4 * 60 * 60 * 1000,
+    // After a call ends, the recorder's last chunks may still be on their way.
+    finalizeGraceMs: int('RECORDING_FINALIZE_SECONDS', 20) * 1000,
   },
 });

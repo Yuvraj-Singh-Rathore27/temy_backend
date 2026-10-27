@@ -150,6 +150,35 @@ describe('real-time messaging', () => {
     assert.equal(ack.ok, false);
     assert.equal(ack.error.code, 'VALIDATION_ERROR');
   });
+
+  test('both people sending at the same moment never deadlock', async () => {
+    const senders = await Promise.all([alice, alice, alice, bob, bob, bob].map(connect));
+    const acks = await Promise.all(
+      senders.flatMap((socket) =>
+        Array.from({ length: 15 }, (_, i) => emitAck(socket, 'message:send', { conversationId: conversation.id, body: `burst ${i}` })),
+      ),
+    );
+    assert.deepEqual(acks.filter((ack) => !ack.ok).map((ack) => ack.error), []);
+
+    const ids = acks.map((ack) => ack.data.message.id);
+    const [[row]] = await pool.query('SELECT last_message_id FROM conversations WHERE id = ?', [conversation.id]);
+    assert.equal(row.last_message_id, Math.max(...ids));
+  });
+
+  test('delivered and read receipts arriving together with new messages never deadlock', async () => {
+    const [a1, a2, b1, b2] = await Promise.all([alice, alice, bob, bob].map(connect));
+    const results = await Promise.all(
+      Array.from({ length: 15 }, (_, i) => [
+        emitAck(a1, 'message:send', { conversationId: conversation.id, body: `ping ${i}` }),
+        emitAck(a2, 'message:send', { conversationId: conversation.id, body: `pong ${i}` }),
+        emitAck(b1, 'message:delivered', { conversationId: conversation.id }),
+        emitAck(b2, 'message:read', { conversationId: conversation.id }),
+        emitAck(b1, 'message:read', { conversationId: conversation.id }),
+        emitAck(b2, 'message:delivered', { conversationId: conversation.id }),
+      ]).flat(),
+    );
+    assert.deepEqual(results.filter((ack) => !ack.ok).map((ack) => ack.error), []);
+  });
 });
 
 describe('typing indicators', () => {

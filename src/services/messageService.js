@@ -72,6 +72,9 @@ function assertRegular(row) {
 
 const ageMs = (row) => Date.now() - new Date(row.created_at).getTime();
 
+// Group read/delivered point last announced to each group ("<conversationId>:<kind>" -> message id).
+const groupStatusSent = new Map();
+
 export const messageService = {
   async list(userId, conversationId, { before, after, limit }, deviceId = null) {
     await conversationService.assertParticipant(conversationId, userId);
@@ -192,6 +195,7 @@ export const messageService = {
     let messageId;
     try {
       messageId = await withTransaction(async (connection) => {
+        await conversationRepository.lockForUpdate(connection, conversationId);
         const id = await messageRepository.insert(connection, {
           conversationId,
           senderId,
@@ -433,7 +437,10 @@ export const messageService = {
     await conversationService.assertParticipant(conversationId, userId);
     const at = new Date();
     if ((await conversationRepository.getType(conversationId)) === 'group') return this.markGroupReceipt({ userId, conversationId, upToId, kind, at });
-    const maxId = await messageRepository.markReceipt({ conversationId, recipientId: userId, upToId, at, kind });
+    const maxId = await withTransaction(async (connection) => {
+      await conversationRepository.lockForUpdate(connection, conversationId);
+      return messageRepository.markReceipt({ conversationId, recipientId: userId, upToId, at, kind }, connection);
+    });
     if (!maxId) return null;
     return { conversationId, upToMessageId: maxId, status: kind, at: at.toISOString(), byUserId: userId };
   },
@@ -449,8 +456,19 @@ export const messageService = {
     if (!(await conversationRepository.advanceWatermark({ conversationId, userId, upToId: target, kind }))) return null;
     const { minRead, minDelivered } = await conversationRepository.groupWatermarks(conversationId);
     const upToMessageId = kind === 'read' ? minRead : minDelivered;
+    // The whole group only hears about it when the group-wide point moved (senders' ticks change);
+    // otherwise just my own tabs do. In a group of 100 that avoids ~10,000 events per message.
+    const key = `${conversationId}:${kind}`;
+    const toGroup = upToMessageId > 0 && groupStatusSent.get(key) !== upToMessageId; // 0: nothing to tick yet
+    if (toGroup) groupStatusSent.set(key, upToMessageId);
     // byUserId: me, so my other tabs clear their unread badge; senders update their ticks.
-    return { conversationId, upToMessageId, status: kind, at: at.toISOString(), byUserId: userId, group: true };
+    const receipt = { conversationId, upToMessageId, status: kind, at: at.toISOString(), byUserId: userId, group: true };
+    return Object.defineProperty(receipt, 'toGroup', { value: toGroup, enumerable: false }); // server-side only
+  },
+
+  /** Tests: forget which group read points were announced (conversation ids repeat after a reset). */
+  resetGroupStatus() {
+    groupStatusSent.clear();
   },
 
   /** When a user comes online, everything waiting for them counts as delivered. */

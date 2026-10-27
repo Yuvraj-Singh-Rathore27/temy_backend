@@ -1,14 +1,12 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { config } from '../config/index.js';
 import { settingsRepository } from '../repositories/settingsRepository.js';
 import { wallpaperRepository } from '../repositories/wallpaperRepository.js';
 import { AppError } from '../utils/AppError.js';
 import { logger } from '../utils/logger.js';
-import { detectImageType } from './profileService.js';
+import { objectStorage } from './objectStorage.js';
+import { IMAGE_MIME, detectImageType } from './profileService.js';
 
-export const WALLPAPER_DIR = path.join(config.uploads.dir, 'wallpapers');
+/** Custom wallpapers are stored at wallpapers/<name> (local disk or S3) and served at /uploads/wallpapers/<name>. */
 export const WALLPAPER_PRESETS = ['none', 'dots', 'grid', 'waves', 'sunset', 'ocean', 'forest', 'lavender', 'night'];
 const MAX_CUSTOM = 10;
 const FILE_NAME = /^[a-f0-9]{32}\.(jpg|png|webp)$/;
@@ -29,8 +27,7 @@ export const wallpaperService = {
       throw new AppError(409, 'TOO_MANY_WALLPAPERS', `You can keep up to ${MAX_CUSTOM} wallpapers. Delete one first.`);
     }
     const fileName = `${crypto.randomBytes(16).toString('hex')}.${type}`;
-    await fs.mkdir(WALLPAPER_DIR, { recursive: true });
-    await fs.writeFile(path.join(WALLPAPER_DIR, fileName), file.buffer, { flag: 'wx' });
+    await objectStorage.current.putBuffer(`wallpapers/${fileName}`, file.buffer, IMAGE_MIME[type]);
     const id = await wallpaperRepository.create(userId, fileName);
     return toWallpaper({ id, file_name: fileName });
   },
@@ -41,11 +38,13 @@ export const wallpaperService = {
     if (!row) throw AppError.notFound('Wallpaper not found');
     await wallpaperRepository.delete(id);
     await settingsRepository.clearWallpaperEverywhere(userId, `custom:${id}`);
-    if (FILE_NAME.test(row.file_name)) {
-      await fs.unlink(path.join(WALLPAPER_DIR, row.file_name)).catch((error) => {
-        if (error.code !== 'ENOENT') logger.warn('Could not delete wallpaper file', { error });
-      });
-    }
+    await this.deleteFile(row.file_name);
+  },
+
+  /** Remove a wallpaper's file (only names we generated: no path tricks). */
+  async deleteFile(fileName) {
+    if (!FILE_NAME.test(fileName ?? '')) return;
+    await objectStorage.removeEverywhere(`wallpapers/${fileName}`).catch((error) => logger.warn('Could not delete wallpaper file', { error }));
   },
 
   /** A wallpaper value is a known preset or one of the user's own uploads. */

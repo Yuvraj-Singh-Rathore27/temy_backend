@@ -26,6 +26,13 @@ export function relationColumns(alias, viewer) {
 }
 
 export const userRepository = {
+  /** Several users at once (public columns), in no particular order. */
+  async findManyByIds(ids) {
+    if (ids.length === 0) return [];
+    const [rows] = await pool.query(`SELECT ${userColumns()} FROM users WHERE id IN (?)`, [ids]);
+    return rows;
+  },
+
   async create({ name, email, passwordHash }) {
     const [result] = await pool.execute('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)', [
       name,

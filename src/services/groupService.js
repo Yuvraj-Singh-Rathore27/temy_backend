@@ -12,6 +12,23 @@ import { messageService } from './messageService.js';
 import { presenceService } from './presenceService.js';
 import { deleteAvatarFile, storeAvatarImage } from './profileService.js';
 import { avatarUrl, canSeeEmail, canSeePresence } from './serializers.js';
+import { groupCallService } from './groupCallService.js';
+import { logger } from '../utils/logger.js';
+
+/**
+ * A transaction that changes a group. It locks the chat row first, the same order as
+ * sending a message (chat row, then member rows), so concurrent sends, receipts and
+ * group changes queue up instead of deadlocking.
+ */
+const inGroup = (conversationId, fn) =>
+  withTransaction(async (connection) => {
+    await conversationRepository.lockForUpdate(connection, conversationId);
+    return fn(connection);
+  });
+
+/** Someone who leaves (or is removed from) a group leaves its call too; never blocks the group change. */
+const leaveGroupCall = (conversationId, userId) =>
+  groupCallService.removedFromGroup(conversationId, userId).catch((error) => logger.warn('Leaving the group call failed', { conversationId, userId, error }));
 
 export const MAX_GROUP_MEMBERS = 256;
 const notFound = () => AppError.notFound('Group not found');
@@ -83,6 +100,7 @@ export const groupService = {
 
   /** Insert a system message (inside a transaction) and keep the chat list ordered. */
   async recordEvent(connection, { conversationId, actorId, type, data, at = new Date() }) {
+    await conversationRepository.lockForUpdate(connection, conversationId);
     const id = await messageRepository.insertEvent(connection, { conversationId, actorId, type, data, at });
     await conversationRepository.setLastMessage(connection, { conversationId, messageId: id, at });
     await conversationRepository.advanceWatermark({ conversationId, userId: actorId, upToId: id, kind: 'read' }, connection);
@@ -132,7 +150,7 @@ export const groupService = {
       edit_permission: editPermission,
     });
 
-    const eventIds = await withTransaction(async (connection) => {
+    const eventIds = await inGroup(conversationId, async (connection) => {
       const ids = [];
       const record = (type, data) => this.recordEvent(connection, { conversationId, actorId: userId, type, data });
       if (name !== undefined && name !== group.name) ids.push(await record('group_renamed', { name }));
@@ -150,7 +168,7 @@ export const groupService = {
     const fileName = file ? await storeAvatarImage(file) : null;
     await groupRepository.update(conversationId, { avatar_path: fileName });
     await deleteAvatarFile(group.avatar_path);
-    const eventId = await withTransaction((connection) =>
+    const eventId = await inGroup(conversationId, (connection) =>
       this.recordEvent(connection, { conversationId, actorId: userId, type: fileName ? 'photo_changed' : 'photo_removed', data: {} }),
     );
     return change(conversationId, [eventId], await conversationRepository.listParticipantIds(conversationId));
@@ -160,7 +178,7 @@ export const groupService = {
     await this.requireAdmin(userId, conversationId);
     const ids = [...new Set(userIds)].filter((id) => id !== userId);
     await this.assertAddable(userId, ids);
-    const result = await withTransaction(async (connection) => {
+    const result = await inGroup(conversationId, async (connection) => {
       if ((await groupRepository.countMembers(conversationId, connection)) + ids.length > MAX_GROUP_MEMBERS) {
         throw AppError.badRequest(`A group can have at most ${MAX_GROUP_MEMBERS} members`);
       }
@@ -184,7 +202,8 @@ export const groupService = {
     if (targetRole === 'admin' && role !== 'owner') throw new AppError(403, 'FORBIDDEN', 'Only the group owner can remove an admin');
     const target = await userRepository.findById(targetId);
     const participantsBefore = await conversationRepository.listParticipantIds(conversationId);
-    const eventId = await withTransaction(async (connection) => {
+    await leaveGroupCall(conversationId, targetId);
+    const eventId = await inGroup(conversationId, async (connection) => {
       await groupRepository.removeMember(connection, conversationId, targetId);
       return this.recordEvent(connection, { conversationId, actorId: userId, type: 'member_removed', data: { user: snapshot(target) } });
     });
@@ -200,7 +219,7 @@ export const groupService = {
     if (targetRole === 'owner') throw new AppError(403, 'FORBIDDEN', "The group owner's role can't be changed");
     if (targetRole === newRole) return change(conversationId, [], await conversationRepository.listParticipantIds(conversationId));
     const target = await userRepository.findById(targetId);
-    const eventId = await withTransaction(async (connection) => {
+    const eventId = await inGroup(conversationId, async (connection) => {
       await groupRepository.setRole(conversationId, targetId, newRole, connection);
       const type = newRole === 'admin' ? 'admin_promoted' : 'admin_dismissed';
       return this.recordEvent(connection, { conversationId, actorId: userId, type, data: { user: snapshot(target) } });
@@ -213,7 +232,8 @@ export const groupService = {
     const { group, role } = await this.membership(userId, conversationId);
     const me = await userRepository.findById(userId);
     const participantsBefore = await conversationRepository.listParticipantIds(conversationId);
-    const result = await withTransaction(async (connection) => {
+    await leaveGroupCall(conversationId, userId); // first: the group may be deleted below
+    const result = await inGroup(conversationId, async (connection) => {
       const eventIds = [];
       if (role === 'owner') {
         const nextOwnerId = await groupRepository.nextOwner(connection, conversationId);
@@ -276,7 +296,7 @@ export const groupService = {
       return change(conversationId, [], await conversationRepository.listParticipantIds(conversationId));
     }
     const me = await userRepository.findById(userId);
-    const eventId = await withTransaction(async (connection) => {
+    const eventId = await inGroup(conversationId, async (connection) => {
       if ((await groupRepository.countMembers(conversationId, connection)) >= MAX_GROUP_MEMBERS) {
         throw AppError.badRequest('This group is full');
       }

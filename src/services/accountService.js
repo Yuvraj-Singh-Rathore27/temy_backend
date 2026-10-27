@@ -1,6 +1,4 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import bcrypt from 'bcryptjs';
+import bcrypt from 'bcrypt';
 import { pool, withTransaction } from '../db/pool.js';
 import { conversationRepository } from '../repositories/conversationRepository.js';
 import { userRepository } from '../repositories/userRepository.js';
@@ -12,9 +10,10 @@ import { callService } from './callService.js';
 import { contactService } from './contactService.js';
 import { groupService } from './groupService.js';
 import { deleteAvatarFile } from './profileService.js';
+import { recordingService } from './recordingService.js';
 import { toUser } from './serializers.js';
 import { settingsService } from './settingsService.js';
-import { WALLPAPER_DIR } from './wallpaperService.js';
+import { wallpaperService } from './wallpaperService.js';
 
 const iso = (value) => (value ? new Date(value).toISOString() : null);
 
@@ -135,6 +134,8 @@ export const accountService = {
   async deleteAccount(userId, password) {
     const user = await assertPassword(userId, password);
     await callService.endAllFor(userId).catch((error) => logger.warn('Ending call on account deletion failed', { userId, error }));
+    // My call recordings' files (in S3 or on disk); their rows go with the account.
+    await recordingService.removeAllBy(userId);
 
     // Leave every group first, so each one keeps an owner (or is deleted if I was the last member).
     const ids = await conversationRepository.listIdsForUser(userId);
@@ -181,7 +182,7 @@ export const accountService = {
     ]);
     await deleteAvatarFile(user.avatar_path);
     for (const { file_name: fileName } of wallpapers) {
-      await fs.unlink(path.join(WALLPAPER_DIR, fileName)).catch(() => {});
+      await wallpaperService.deleteFile(fileName);
     }
     logger.info('Account deleted', { userId });
 

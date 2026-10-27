@@ -1,7 +1,7 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { auth, closeAll, connectUsers, emitAck, pool, registerUser, resetDatabase, startServer, waitFor } from './helpers.js';
+import { auth, closeAll, connectUsers, emitAck, pool, registerUser, resetDatabase, startServer, storedFileExists, waitFor } from './helpers.js';
 
 let server;
 let request;
@@ -69,7 +69,7 @@ describe('uploading', () => {
 
     const [rows] = await pool.query('SELECT storage_key FROM attachments WHERE id = ?', [a.id]);
     assert.match(rows[0].storage_key, /^[a-f0-9]{32}$/);
-    await fs.access(attachmentStorage.pathFor(rows[0].storage_key));
+    assert.equal(await storedFileExists(attachmentStorage.objectKey(rows[0].storage_key)), true);
   });
 
   test('blocks programs, by content and by extension', async () => {
@@ -218,7 +218,7 @@ describe('lifecycle', () => {
     const res = await request.delete(`/api/messages/${message.id}?scope=everyone`).set(auth(alice.token)).expect(200);
     assert.deepEqual(res.body.message.attachments, []);
     await request.get(photo.url).set(auth(bob.token)).expect(404);
-    await assert.rejects(fs.access(attachmentStorage.pathFor(row.storage_key)));
+    assert.equal(await storedFileExists(attachmentStorage.objectKey(row.storage_key)), false);
   });
 
   test('forwarded files survive deletion of the original', async () => {
@@ -238,7 +238,7 @@ describe('lifecycle', () => {
     const [[row]] = await pool.query('SELECT storage_key FROM attachments WHERE id = ?', [stale.id]);
     await pool.query('UPDATE attachments SET created_at = NOW(3) - INTERVAL 25 HOUR WHERE id = ?', [stale.id]);
     assert.ok((await attachmentService.deleteOrphans()) >= 1);
-    await assert.rejects(fs.access(attachmentStorage.pathFor(row.storage_key)));
+    assert.equal(await storedFileExists(attachmentStorage.objectKey(row.storage_key)), false);
   });
 });
 

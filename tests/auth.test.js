@@ -1,5 +1,6 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { config } from '../src/config/index.js';
 import { auth, closeAll, pool, registerUser, resetDatabase, startServer } from './helpers.js';
 
 let server;
@@ -19,6 +20,30 @@ after(async () => {
 const XHR = { 'X-Requested-With': 'XMLHttpRequest' };
 
 describe('registration', () => {
+  test('with email verification turned off (REQUIRE_EMAIL_VERIFICATION), registering signs the user in directly', async () => {
+    config.auth.requireEmailVerification = false;
+    try {
+      const reg = await request
+        .post('/api/auth/register')
+        .send({ name: 'Direct', email: 'Direct@Example.com', password: 'password123' })
+        .expect(201);
+      assert.equal(reg.body.requiresVerification, undefined);
+      assert.equal(reg.body.devOtp, undefined, 'no code is sent');
+      assert.equal(reg.body.user.email, 'direct@example.com');
+      assert.equal(reg.body.user.emailVerified, true);
+      assert.ok(reg.body.accessToken);
+      assert.ok(reg.headers['set-cookie']?.some((c) => c.startsWith(`${config.auth.refreshCookieName}=`)), 'session cookie is set');
+
+      const me = await request.get('/api/auth/me').set(auth(reg.body.accessToken)).expect(200);
+      assert.equal(me.body.user.email, 'direct@example.com');
+      // The account is a normal, verified one: it can sign in again and can't be registered twice.
+      await request.post('/api/auth/login').send({ email: 'direct@example.com', password: 'password123' }).expect(200);
+      await request.post('/api/auth/register').send({ name: 'Again', email: 'direct@example.com', password: 'password456' }).expect(409);
+    } finally {
+      config.auth.requireEmailVerification = true;
+    }
+  });
+
   test('creates an unverified account and only starts a session after the email code is confirmed', async () => {
     const reg = await request
       .post('/api/auth/register')

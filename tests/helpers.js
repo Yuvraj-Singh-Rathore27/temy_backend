@@ -1,7 +1,11 @@
 // Must be the first import of every test file: configures the test environment
 // before any application module reads its configuration.
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// Everything below until the first `await` runs before any other module of a test file
+// is evaluated, so test files may import application modules statically.
 
 const serverRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 try {
@@ -15,8 +19,10 @@ process.env.JWT_ACCESS_SECRET ||= 'test-secret-that-is-definitely-longer-than-32
 process.env.BCRYPT_ROUNDS = '4';
 // Codes are returned in responses only when explicitly enabled (never in production).
 process.env.OTP_DEV_DISPLAY = 'true';
+// The full sign-up flow (code by email) is tested; auth.test.js also covers it turned off.
+process.env.REQUIRE_EMAIL_VERIFICATION = 'true';
 // Test uploads go to a throwaway folder, never the real server/uploads.
-process.env.UPLOAD_DIR = path.join((await import('node:os')).tmpdir(), 'temu-test-uploads');
+process.env.UPLOAD_DIR = path.join(os.tmpdir(), 'temu-test-uploads');
 // Small limits so size checks can be tested quickly.
 process.env.MAX_IMAGE_MB = '1';
 process.env.MAX_AUDIO_MB = '1';
@@ -29,6 +35,10 @@ process.env.CALL_RECONNECT_GRACE_SECONDS = '1';
 process.env.STUN_URLS = 'stun:stun.example.test:3478';
 process.env.TURN_URLS = 'turn:turn.example.test:3478';
 process.env.TURN_SECRET = 'turn-test-secret';
+// Recordings: stored on the local test disk, saved 1 second after the call ends, at most 1 MB.
+process.env.STORAGE_DRIVER = 'local';
+process.env.RECORDING_FINALIZE_SECONDS = '1';
+process.env.MAX_RECORDING_MB = '1';
 
 const http = await import('node:http');
 const { io: ioClient } = await import('socket.io-client');
@@ -40,6 +50,71 @@ const { createSocketServer } = await import('../src/sockets/index.js');
 const { presenceService } = await import('../src/services/presenceService.js');
 const { realtime } = await import('../src/sockets/realtime.js');
 const { callService } = await import('../src/services/callService.js');
+const { recordingService } = await import('../src/services/recordingService.js');
+const { messageService } = await import('../src/services/messageService.js');
+const { objectStorage, createS3Storage } = await import('../src/services/objectStorage.js');
+const { Readable } = await import('node:stream');
+
+/** An in-memory S3 bucket that speaks the AWS SDK's command objects (Put, Get with Range, Head, Delete). */
+export function fakeS3() {
+  const objects = new Map();
+  const calls = [];
+  return {
+    objects,
+    calls,
+    async send(command) {
+      const name = command.constructor.name;
+      const input = command.input;
+      calls.push({ name, input });
+      if (name === 'PutObjectCommand') {
+        let body = input.Body;
+        if (!Buffer.isBuffer(body)) {
+          const chunks = [];
+          for await (const chunk of body) chunks.push(chunk);
+          body = Buffer.concat(chunks);
+        }
+        objects.set(input.Key, { body, contentType: input.ContentType, encryption: input.ServerSideEncryption });
+        return {};
+      }
+      if (name === 'GetObjectCommand' || name === 'HeadObjectCommand') {
+        const object = objects.get(input.Key);
+        if (!object) throw Object.assign(new Error('Not found'), { name: name === 'HeadObjectCommand' ? 'NotFound' : 'NoSuchKey', $metadata: { httpStatusCode: 404 } });
+        if (name === 'HeadObjectCommand') return { ContentLength: object.body.length, ContentType: object.contentType };
+        let body = object.body;
+        const match = input.Range && /^bytes=(\d+)-(\d+)$/.exec(input.Range);
+        if (match) body = body.subarray(Number(match[1]), Number(match[2]) + 1);
+        return { Body: Readable.from([body]) };
+      }
+      if (name === 'DeleteObjectCommand') {
+        objects.delete(input.Key);
+        return {};
+      }
+      throw new Error(`Unexpected ${name}`);
+    },
+  };
+}
+
+// TEST_STORAGE=s3 npm test: every stored file goes to an in-memory S3 bucket instead of the disk.
+export const testBucket = process.env.TEST_STORAGE === 's3' ? fakeS3() : null;
+if (testBucket) objectStorage.useDriver('s3', createS3Storage({ bucket: 'temu-test-bucket', client: testBucket }), { current: true });
+
+/** Is a file stored under this key (in whichever storage the tests use)? */
+export async function storedFileExists(key) {
+  try {
+    await objectStorage.current.stat(key);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+/** The bytes stored under this key. */
+export async function readStoredFile(key) {
+  const chunks = [];
+  for await (const chunk of await objectStorage.current.read(key)) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
 const { settlePresence } = await import('../src/sockets/handlers/presenceHandlers.js');
 
 export { pool };
@@ -57,6 +132,8 @@ export async function resetDatabase() {
   await pool.query('SET FOREIGN_KEY_CHECKS = 1');
   presenceService.reset();
   callService.reset();
+  recordingService.reset();
+  messageService.resetGroupStatus();
 }
 
 /** Start the full HTTP + Socket.IO stack on a random port. */
@@ -86,6 +163,7 @@ export async function startServer() {
       for (const socket of sockets) socket.disconnect();
       io.close();
       callService.reset();
+      recordingService.reset();
       await settlePresence();
       realtime.detach();
       await new Promise((resolve) => server.close(resolve));

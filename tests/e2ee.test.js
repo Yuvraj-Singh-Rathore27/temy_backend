@@ -1,6 +1,6 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import * as e2ee from '../../client/src/e2ee/crypto.js';
+import * as e2ee from '../../temy_frontend/src/e2ee/crypto.js';
 import { auth, closeAll, connectUsers, emitAck, pool, registerUser, resetDatabase, startServer, waitFor } from './helpers.js';
 
 let server;
@@ -225,6 +225,13 @@ describe('encrypted messages', () => {
     assert.equal(download.headers['content-type'], 'application/octet-stream');
     const plain = new TextDecoder().decode(await e2ee.decryptBytes(download.body, meta.key, meta.iv));
     assert.equal(plain, 'MZ pretend this is anything');
+
+    // Server search skips encrypted messages (it can't read them; their files are all named "encrypted").
+    const older = (await request.post(`/api/conversations/${chat.id}/messages`).set(auth(alice.token)).send({ body: 'an older encrypted-word note' }).expect(201)).body.message;
+    for (const query of ['encrypted', 'encrypted-word']) {
+      const found = (await request.get(`/api/messages/search?q=${query}&conversationId=${chat.id}`).set(auth(bob.token)).expect(200)).body.messages;
+      assert.deepEqual(found.map((m) => m.id), [older.id], `search "${query}"`);
+    }
 
     // An encrypted image (e.g. a GIF) can be sent again: the file is shared, the key goes in the new message.
     const gifSealed = await e2ee.encryptBytes(new TextEncoder().encode('GIF89a...'));

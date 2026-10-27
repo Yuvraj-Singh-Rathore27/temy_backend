@@ -51,7 +51,7 @@ export const stickerService = {
     const tempPath = path.join(TEMP_DIR, crypto.randomBytes(16).toString('hex'));
     await fs.writeFile(tempPath, file.buffer);
     try {
-      const storageKey = await attachmentStorage.store(tempPath);
+      const storageKey = await attachmentStorage.store(tempPath, type.mime);
       return toSticker(await stickerRepository.add({ userId, storageKey, mimeType: type.mime, sizeBytes: file.buffer.length, width, height }));
     } finally {
       await attachmentStorage.discardTemp(tempPath);
@@ -104,6 +104,6 @@ export const stickerService = {
   async getImage(userId, id) {
     const row = await stickerRepository.find(userId, id);
     if (!row) throw notFound();
-    return { path: attachmentStorage.pathFor(row.storage_key), mimeType: row.mime_type, name: 'sticker', inline: true };
+    return { storageKey: row.storage_key, mimeType: row.mime_type, name: 'sticker', inline: true };
   },
 };

@@ -1,6 +1,7 @@
 import { Server } from 'socket.io';
 import { config } from '../config/index.js';
 import { callService } from '../services/callService.js';
+import { groupCallService } from '../services/groupCallService.js';
 import { conversationService } from '../services/conversationService.js';
 import { logger } from '../utils/logger.js';
 import { registerCallHandlers } from './handlers/callHandlers.js';
@@ -49,6 +50,8 @@ export function createSocketServer(httpServer) {
       await handlePresenceConnect(socket);
       socket.emit('session:ready', { userId: user.id });
       callService.tabConnected(socket);
+      // Group calls going on in my groups: show "Join", and ring if it is still ringing for me.
+      groupCallService.greet(socket, conversationIds);
     } catch (error) {
       logger.error('Socket connection setup failed', { userId: user.id, error });
       socket.disconnect(true);

@@ -111,7 +111,7 @@ export const gifService = {
       if (used + size > config.uploads.dailyQuotaBytes) {
         throw new AppError(413, 'UPLOAD_QUOTA_EXCEEDED', 'You reached the daily upload limit. Please try again later.');
       }
-      const storageKey = await attachmentStorage.store(tempPath);
+      const storageKey = await attachmentStorage.store(tempPath, 'image/gif');
       const id = await attachmentRepository.insert({
         uploaderId: userId,
         conversationId,

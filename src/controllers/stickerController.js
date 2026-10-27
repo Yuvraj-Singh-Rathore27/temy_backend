@@ -29,6 +29,6 @@ export const stickerController = {
   },
 
   async image(req, res, next) {
-    sendAttachment(req, res, next, await stickerService.getImage(req.user.id, req.valid.params.id));
+    await sendAttachment(req, res, next, await stickerService.getImage(req.user.id, req.valid.params.id));
   },
 };

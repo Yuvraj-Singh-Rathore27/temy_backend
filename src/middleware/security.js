@@ -39,6 +39,8 @@ export const rateLimiters = {
   search: limiter({ windowMs: 60_000, limit: 60, message: 'Too many searches, please slow down' }),
   messageActions: limiter({ windowMs: 60_000, limit: 120, message: 'You are doing that too fast. Please slow down.' }),
   messages: limiter({ windowMs: 60_000, limit: 120, message: 'You are sending messages too fast' }),
+  // Call recordings upload a chunk every few seconds per recording.
+  recordings: limiter({ windowMs: 60_000, limit: 120, message: 'Too many recording uploads. Please slow down.' }),
 };
 
 /**

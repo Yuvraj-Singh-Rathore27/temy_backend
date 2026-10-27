@@ -1,4 +1,4 @@
-import bcrypt from 'bcryptjs';
+import bcrypt from 'bcrypt';
 import { config } from '../config/index.js';
 import { sessionRepository } from '../repositories/sessionRepository.js';
 import { userRepository } from '../repositories/userRepository.js';
@@ -40,10 +40,11 @@ const ACCOUNT_EXISTS = 'An account with this email already exists';
 
 export const authService = {
   /**
-   * Create an account and email a verification code. No session is started until
-   * the email is verified. Re-registering a never-verified email replaces its
-   * name/password (only the inbox owner can finish verification anyway).
-   * Returns { email, retryAfterSeconds, devOtp? }.
+   * Create an account. With REQUIRE_EMAIL_VERIFICATION=true it emails a verification
+   * code and no session is started until the email is verified (re-registering a
+   * never-verified email replaces its name/password: only the inbox owner can finish
+   * verification anyway); returns { requiresVerification, email, retryAfterSeconds, devOtp? }.
+   * Otherwise (for now) the email is trusted and the session starts right away.
    */
   async register({ name, email, password }, meta) {
     const passwordHash = await bcrypt.hash(password, config.auth.bcryptRounds);
@@ -62,10 +63,10 @@ export const authService = {
       }
       logger.info('User registered', { userId: user.id });
     }
-    // TEMPORARILY DISABLED: email verification (OTP). Re-enable later by restoring the
-    // line below, removing the auto-verify + startSession lines, and reverting the
-    // controller (register) and client (RegisterPage/AuthContext) changes.
-    // return { email: user.email, ...(await otpService.issue(user, 'verify_email')) };
+    if (config.auth.requireEmailVerification) {
+      return { requiresVerification: true, email: user.email, ...(await otpService.issue(user, 'verify_email')) };
+    }
+    // Email verification is turned off (REQUIRE_EMAIL_VERIFICATION): sign the user in directly.
     await userRepository.markEmailVerified(user.id, new Date());
     return startSession(await userRepository.findById(user.id), meta);
   },

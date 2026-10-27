@@ -6,6 +6,7 @@ import { otpRepository } from './repositories/otpRepository.js';
 import { sessionRepository } from './repositories/sessionRepository.js';
 import { attachmentService } from './services/attachmentService.js';
 import { callService } from './services/callService.js';
+import { recordingService } from './services/recordingService.js';
 import { settlePresence } from './sockets/handlers/presenceHandlers.js';
 import { createSocketServer } from './sockets/index.js';
 import { logger } from './utils/logger.js';
@@ -16,6 +17,8 @@ async function main() {
     await pool.query('SELECT 1 FROM schema_migrations LIMIT 1');
     // No call can survive a restart; this also fails if the latest migrations are missing.
     await callService.closeStale();
+    // Recordings cut off by the restart are saved with the chunks that arrived.
+    await recordingService.recoverInterrupted();
   } catch (error) {
     logger.error('Database is not ready. Did you run "npm run migrate"?', { error });
     process.exit(1);

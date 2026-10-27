@@ -1,14 +1,13 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { config } from '../config/index.js';
 import { userRepository } from '../repositories/userRepository.js';
 import { AppError } from '../utils/AppError.js';
 import { logger } from '../utils/logger.js';
+import { objectStorage } from './objectStorage.js';
 import { toPublicUser, toUser } from './serializers.js';
 
-export const AVATAR_DIR = path.join(config.uploads.dir, 'avatars');
+/** Profile and group photos are stored at avatars/<name> (local disk or S3) and served at /uploads/avatars/<name>. */
 const AVATAR_NAME = /^[a-f0-9]{32}\.(jpg|png|webp)$/;
+export const IMAGE_MIME = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
 
 /**
  * Identify an image by its first bytes. The client-supplied MIME type and file
@@ -27,19 +26,14 @@ export async function storeAvatarImage(file) {
   const type = detectImageType(file.buffer);
   if (!type) throw new AppError(415, 'UNSUPPORTED_FILE', 'Only JPG, PNG or WebP images are allowed');
   const fileName = `${crypto.randomBytes(16).toString('hex')}.${type}`;
-  await fs.mkdir(AVATAR_DIR, { recursive: true });
-  await fs.writeFile(path.join(AVATAR_DIR, fileName), file.buffer, { flag: 'wx' });
+  await objectStorage.current.putBuffer(`avatars/${fileName}`, file.buffer, IMAGE_MIME[type]);
   return fileName;
 }
 
 export async function deleteAvatarFile(fileName) {
   // Only ever delete names we generated ourselves (no path traversal).
   if (!fileName || !AVATAR_NAME.test(fileName)) return;
-  try {
-    await fs.unlink(path.join(AVATAR_DIR, fileName));
-  } catch (error) {
-    if (error.code !== 'ENOENT') logger.warn('Could not delete old avatar', { error });
-  }
+  await objectStorage.removeEverywhere(`avatars/${fileName}`).catch((error) => logger.warn('Could not delete old avatar', { error }));
 }
 
 export const profileService = {

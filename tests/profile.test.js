@@ -1,14 +1,12 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs/promises';
 import path from 'node:path';
-import { auth, closeAll, connectUsers, registerUser, resetDatabase, startServer, waitFor } from './helpers.js';
+import { auth, closeAll, connectUsers, registerUser, resetDatabase, startServer, storedFileExists, waitFor } from './helpers.js';
 
 let server;
 let request;
 let alice;
 let bob;
-let AVATAR_DIR;
 
 // Smallest valid image headers; the server identifies files by these bytes.
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64)]);
@@ -16,7 +14,6 @@ const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(6
 
 before(async () => {
   await resetDatabase();
-  ({ AVATAR_DIR } = await import('../src/services/profileService.js'));
   server = await startServer();
   request = server.request;
   alice = await registerUser(request, { name: 'Alice Profile' });
@@ -89,7 +86,7 @@ describe('profile photo', () => {
 
     const second = await request.put('/api/profile/avatar').set(auth(alice.token)).attach('avatar', JPG, 'me.jpg').expect(200);
     assert.match(second.body.user.avatarUrl, /\.jpg$/);
-    await assert.rejects(fs.access(path.join(AVATAR_DIR, path.basename(firstUrl))), 'old photo was deleted');
+    assert.equal(await storedFileExists(`avatars/${path.basename(firstUrl)}`), false, 'old photo was deleted');
     await request.get(firstUrl).expect(404);
   });
 

@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import { config } from '../config/index.js';
 import { withTransaction } from '../db/pool.js';
 import { blockRepository } from '../repositories/blockRepository.js';
@@ -12,6 +11,8 @@ import { logger } from '../utils/logger.js';
 import { conversationService } from './conversationService.js';
 import { messageService } from './messageService.js';
 import { notificationService } from './notificationService.js';
+import { callEvents, callOfUser, iceServersFor, live } from './callRegistry.js';
+import { groupCallService } from './groupCallService.js';
 import { avatarUrl } from './serializers.js';
 
 /**
@@ -23,10 +24,29 @@ import { avatarUrl } from './serializers.js';
  * Live calls are kept in memory (one API process, like presence); the
  * `calls` table is the history. Each live call:
  * { id, conversationId, callerId, calleeId, type, status, createdAt, answeredAt,
- *   callerTab, calleeTab, ringTimer, graceTimers: Map<userId, timer> }
+ *   callerTab, calleeTab, ringTimer, graceTimers: Map<userId, timer>,
+ *   joined: [userId…] in the order people joined, hostId }
+ *
+ * Host: the person who started the call. Only the host may record it. When the host's
+ * tab disconnects, the next person who joined (and is still connected) becomes host;
+ * a host who comes back does not take it back.
  */
-const live = new Map(); // callId -> call
-const callOfUser = new Map(); // userId -> callId
+
+/** Is this participant's call tab connected right now? */
+function isInCall(call, userId) {
+  const tab = userId === call.callerId ? call.callerTab : userId === call.calleeId ? call.calleeTab : null;
+  return Boolean(tab) && realtime.isTabConnected(userId, tab);
+}
+
+/** Hand the host role to the first person, in joining order, who is still connected. */
+function passHost(call) {
+  const next = call.joined.find((userId) => userId !== call.hostId && isInCall(call, userId));
+  if (!next) return; // nobody else here: the host stays host
+  const previousHostId = call.hostId;
+  call.hostId = next;
+  realtime.emitToUsers([call.callerId, call.calleeId], 'call:host', { callId: call.id, hostId: next, previousHostId });
+  callEvents.hostChanged({ callId: call.id, hostId: next, previousHostId });
+}
 
 const notFound = () => AppError.notFound('This call has ended');
 
@@ -43,26 +63,35 @@ function toLiveCall(call, caller, callee) {
     callee: person(callee),
     createdAt: call.createdAt.toISOString(),
     answeredAt: call.answeredAt?.toISOString() ?? null,
+    hostId: call.hostId ?? call.callerId ?? null,
   };
 }
 
 const durationSec = (row) =>
   row.answered_at && row.ended_at ? Math.max(0, Math.round((new Date(row.ended_at) - new Date(row.answered_at)) / 1000)) : 0;
 
-/** A history row as seen by `viewerId`. */
+/**
+ * A history row as seen by `viewerId`. Group calls show the group as the "peer"; for
+ * someone who was rung but never joined, a group call counts as missed.
+ */
 export function toCallLog(row, viewerId) {
   const outgoing = row.caller_id === viewerId;
+  const group = Boolean(Number(row.is_group));
+  const joined = !group || outgoing || Boolean(row.my_joined_at);
   return {
     id: row.id,
     conversationId: row.conversation_id,
     type: row.type,
-    status: row.status,
+    group,
+    status: joined ? row.status : 'missed',
     direction: outgoing ? 'outgoing' : 'incoming',
-    peer: { id: row.peer_id, name: row.peer_name, avatarUrl: row.peer_blocked_me ? null : avatarUrl(row.peer_avatar_path) },
+    peer: group
+      ? { id: null, name: row.group_name ?? 'Group', avatarUrl: avatarUrl(row.group_avatar_path), isGroup: true }
+      : { id: row.peer_id, name: row.peer_name, avatarUrl: row.peer_blocked_me ? null : avatarUrl(row.peer_avatar_path) },
     createdAt: new Date(row.created_at).toISOString(),
     answeredAt: row.answered_at ? new Date(row.answered_at).toISOString() : null,
     endedAt: row.ended_at ? new Date(row.ended_at).toISOString() : null,
-    durationSec: durationSec(row),
+    durationSec: joined ? durationSec(row) : 0,
   };
 }
 
@@ -76,37 +105,50 @@ function forget(call) {
 
 function liveCallFor(userId, callId) {
   const call = live.get(callId);
-  if (!call || (call.callerId !== userId && call.calleeId !== userId)) throw notFound();
+  if (!call || call.isGroup || (call.callerId !== userId && call.calleeId !== userId)) throw notFound();
   return call;
 }
 
 export const callService = {
   /** STUN (free, public) plus optional TURN with short-lived per-user credentials. */
-  iceServers(userId) {
-    const { stunUrls, turnUrls, turnSecret, turnUsername, turnCredential, turnTtlSeconds } = config.calls;
-    const servers = [];
-    if (stunUrls.length) servers.push({ urls: stunUrls });
-    if (turnUrls.length) {
-      if (turnSecret) {
-        const username = `${Math.floor(Date.now() / 1000) + turnTtlSeconds}:${userId}`;
-        const credential = crypto.createHmac('sha1', turnSecret).update(username).digest('base64');
-        servers.push({ urls: turnUrls, username, credential });
-      } else if (turnUsername) {
-        servers.push({ urls: turnUrls, username: turnUsername, credential: turnCredential });
-      }
-    }
-    return servers;
-  },
+  iceServers: (userId) => iceServersFor(userId),
 
   /** Is this user in a call (ringing or connected)? */
   isBusy(userId) {
     return callOfUser.has(userId);
   },
 
+  /**
+   * This user's connected call (one-to-one or group):
+   * { id, conversationId, type, hostId, isGroup, participantIds } — participantIds: who is in it now.
+   */
+  ongoingCall(userId, callId) {
+    if (live.get(callId)?.isGroup) return groupCallService.ongoingCall(userId, callId);
+    const call = liveCallFor(userId, callId);
+    if (call.status !== 'ongoing') throw new AppError(409, 'CALL_NOT_CONNECTED', 'The call is not connected');
+    const { id, conversationId, type, hostId } = call;
+    return { id, conversationId, type, hostId, isGroup: false, participantIds: [call.callerId, call.calleeId] };
+  },
+
+  /** People in a live call right now (empty once it is over). */
+  participantsOf(callId) {
+    const call = live.get(callId);
+    if (!call) return [];
+    return call.isGroup ? [...call.participants.keys()] : [call.callerId, call.calleeId];
+  },
+
+  /** Run `listener({ callId, hostId, previousHostId })` whenever a call's host changes. */
+  onHostChanged: (listener) => callEvents.onHostChanged(listener),
+
+  /** Run `listener({ id, conversationId })` after every call ends. Returns a function that removes it. */
+  onCallEnded: (listener) => callEvents.onEnded(listener),
+
   /** Hang up whatever call this user is in (account deletion). */
   async endAllFor(userId) {
     const callId = callOfUser.get(userId);
-    if (callId) await this.end(userId, callId);
+    if (!callId) return;
+    if (live.get(callId)?.isGroup) await groupCallService.leave(userId, callId);
+    else await this.end(userId, callId);
   },
 
   /**
@@ -152,6 +194,8 @@ export const callService = {
       graceTimers: new Map(),
       caller,
       callee,
+      joined: [userId],
+      hostId: userId,
     };
     call.ringTimer = setTimeout(() => {
       this.finish(call, 'missed', null).catch((error) => logger.error('Call timeout failed', { callId: id, error }));
@@ -175,6 +219,7 @@ export const callService = {
     if (!(await callRepository.markAnswered(callId, now))) throw notFound();
     clearTimeout(call.ringTimer);
     Object.assign(call, { status: 'ongoing', answeredAt: now, calleeTab: tabId });
+    call.joined.push(userId);
 
     const payload = toLiveCall(call, call.caller, call.callee);
     realtime.toTab(call.callerId, call.callerTab, 'call:accepted', { call: payload });
@@ -191,6 +236,7 @@ export const callService = {
   /** Hang up: cancels a call that is still ringing (missed for them) or ends a connected one. */
   async end(userId, callId) {
     const call = live.get(callId);
+    if (call?.isGroup) return groupCallService.leave(userId, callId);
     if (!call || (call.callerId !== userId && call.calleeId !== userId)) return; // already over: nothing to do
     let status = 'ended';
     if (call.status === 'ringing') status = userId === call.callerId ? 'missed' : 'rejected';
@@ -214,6 +260,7 @@ export const callService = {
     const now = new Date();
     if (!(await callRepository.finish(call.id, { status, endedBy, at: now }))) return;
     realtime.emitToUsers([call.callerId, call.calleeId], 'call:ended', { callId: call.id, status, endedBy });
+    callEvents.ended({ id: call.id, conversationId: call.conversationId });
     const row = await callRepository.findById(call.id);
     await this.recordInChat(row);
     if (status === 'missed') {
@@ -228,6 +275,7 @@ export const callService = {
     const at = new Date(row.ended_at ?? Date.now());
     const data = { callId: row.id, type: row.type, status: row.status, durationSec: durationSec(row), callerId: row.caller_id };
     const messageId = await withTransaction(async (connection) => {
+      await conversationRepository.lockForUpdate(connection, row.conversation_id);
       const id = await messageRepository.insertEvent(connection, { conversationId: row.conversation_id, actorId: row.caller_id, type: 'call', data, at });
       await conversationRepository.setLastMessage(connection, { conversationId: row.conversation_id, messageId: id, at });
       return id;
@@ -241,8 +289,10 @@ export const callService = {
   tabDisconnected(userId, tabId) {
     const call = live.get(callOfUser.get(userId));
     if (!call) return;
+    if (call.isGroup) return groupCallService.tabDisconnected(userId, tabId);
     const mine = userId === call.callerId ? call.callerTab : call.calleeTab;
     if (mine !== tabId || realtime.isTabConnected(userId, tabId)) return;
+    if (call.status === 'ongoing' && call.hostId === userId) passHost(call);
     clearTimeout(call.graceTimers.get(userId));
     call.graceTimers.set(
       userId,
@@ -259,6 +309,7 @@ export const callService = {
     const { user, tabId } = socket.data;
     const call = live.get(callOfUser.get(user.id));
     if (!call) return;
+    if (call.isGroup) return groupCallService.tabConnected(socket);
     clearTimeout(call.graceTimers.get(user.id));
     call.graceTimers.delete(user.id);
     if (call.status === 'ringing' && call.calleeId === user.id) {
@@ -266,7 +317,11 @@ export const callService = {
     }
     if (call.status === 'ongoing') {
       const mine = user.id === call.callerId ? call.callerTab : call.calleeTab;
-      if (mine === tabId) socket.emit('call:resumed', { callId: call.id });
+      if (mine === tabId) {
+        // The host was away when everyone else was too: the first one back takes over.
+        if (!isInCall(call, call.hostId)) passHost(call);
+        socket.emit('call:resumed', { callId: call.id, hostId: call.hostId });
+      }
     }
   },
 
@@ -288,6 +343,9 @@ export const callService = {
 
   /** Tests: forget all live calls. */
   reset() {
-    for (const call of live.values()) forget(call);
+    for (const call of live.values()) {
+      if (call.isGroup) groupCallService.forget(call);
+      else forget(call);
+    }
   },
 };
